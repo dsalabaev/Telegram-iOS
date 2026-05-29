@@ -495,8 +495,10 @@ def resolve_configuration(base_path, bazel_command_line: BazelCommandLine, argum
         additional_codesigning_output_path=additional_codesigning_output_path
     )
     if codesigning_data.aps_environment is None:
-        print('Could not find a valid aps-environment entitlement in the provided provisioning profiles')
-        sys.exit(1)
+        # Swiftgram: when using fake-codesigning the profiles may not match the
+        # configured bundle_id at all. Default to "production" so the build proceeds.
+        print('Warning: no aps-environment found in provisioning profiles, defaulting to "production"')
+        codesigning_data.aps_environment = 'production'
 
     if bazel_command_line is not None:
         build_configuration.write_to_variables_file(bazel_path=bazel_command_line.bazel, use_xcode_managed_codesigning=codesigning_data.use_xcode_managed_codesigning, aps_environment=codesigning_data.aps_environment, path=configuration_repository_path + '/variables.bzl')

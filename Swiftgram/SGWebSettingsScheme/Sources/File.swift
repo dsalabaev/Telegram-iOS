@@ -5,7 +5,31 @@ public struct SGWebSettings: Codable, Equatable {
     public let user: SGUserSettings
     
     public static var defaultValue: SGWebSettings {
-        return SGWebSettings(global: SGGlobalSettings(ytPip: true, qrLogin: true, storiesAvailable: false, canViewMessages: true, canEditSettings: false, canShowTelescope: false, announcementsData: nil, regdateFormat: "month", botMonkeys: [], forceReasons: [], unforceReasons: [], paymentsEnabled: true, duckyAppIconAvailable: true, canGrant: false, proSupportUrl: nil, nyAvailable: false), user: SGUserSettings(contentReasons: [], canSendTelescope: false, canBuyInBeta: true))
+        return SGWebSettings(
+            global: SGGlobalSettings(
+                ytPip: true,
+                qrLogin: true,
+                storiesAvailable: true,
+                canViewMessages: true,
+                canEditSettings: true,
+                canShowTelescope: true,
+                announcementsData: nil,
+                regdateFormat: "month",
+                botMonkeys: [],
+                forceReasons: [],
+                unforceReasons: [],
+                paymentsEnabled: false,  // paywall disabled — Pro unlocked via SGStatus
+                duckyAppIconAvailable: true,
+                canGrant: false,
+                proSupportUrl: nil,
+                nyAvailable: false
+            ),
+            user: SGUserSettings(
+                contentReasons: [],
+                canSendTelescope: true,
+                canBuyInBeta: false      // no IAP in self-build
+            )
+        )
     }
 }
 

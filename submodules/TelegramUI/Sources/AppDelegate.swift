@@ -1410,9 +1410,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     
                     self.resetIntentsIfNeeded(context: context.context)
                     
-                    // MARK: Swiftgram
-                    updateSGWebSettingsInteractivelly(context: context.context)
-                    updateSGGHSettingsInteractivelly(context: context.context)
+                    // MARK: Swiftgram self-build — web settings synced from hardcoded defaultValue
                     let _ = (context.context.sharedContext.presentationData.start(next: { presentationData in
                         SGLocalizationManager.shared.downloadLocale(presentationData.strings.baseLanguageCode)
                     }))
@@ -2060,10 +2058,8 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
              |> take(1)
              |> deliverOnMainQueue).start(next: { activeAccounts in
                 for (_, context, _) in activeAccounts.accounts {
-                    // MARK: Swiftgram
+                    // MARK: Swiftgram self-build — web settings synced from hardcoded defaultValue
                     if !sgTasksLaunched {
-                        updateSGWebSettingsInteractivelly(context: context)
-                        updateSGGHSettingsInteractivelly(context: context)
                         sgTasksLaunched = true
                     }
                     (context.downloadedMediaStoreManager as? DownloadedMediaStoreManagerImpl)?.runTasks()

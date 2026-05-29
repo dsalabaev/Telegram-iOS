@@ -173,6 +173,10 @@ def copy_profiles_from_directory(source_path, destination_path, team_id, bundle_
         '.BroadcastUpload': 'BroadcastUpload'
     }
 
+    # Collect all profiles and track whether any matched the configured bundle_id
+    all_profiles = []  # list of (file_path, profile_dict)
+    matched_any = False
+
     for file_name in os.listdir(source_path):
         file_path = source_path + '/' + file_name
         if os.path.isfile(file_path):
@@ -191,16 +195,28 @@ def copy_profiles_from_directory(source_path, destination_path, team_id, bundle_
 
             profile_dict = plistlib.loads(profile_data)
             profile_name = profile_dict['Entitlements']['application-identifier']
+            all_profiles.append((file_path, profile_dict, profile_name))
 
             if profile_name.startswith(team_id + '.' + bundle_id):
+                matched_any = True
                 profile_base_name = profile_name[len(team_id + '.' + bundle_id):]
                 if profile_base_name in profile_name_mapping:
                     shutil.copyfile(file_path, destination_path + '/' + profile_name_mapping[profile_base_name] + '.mobileprovision')
                 else:
                     print('Warning: skipping provisioning profile at {} with bundle_id {} (base_name {})'.format(file_path, profile_name, profile_base_name))
 
+    # Swiftgram: when using fake-codesigning with a custom bundle_id the profiles
+    # won't match. Copy them anyway using filename-based mapping so Bazel has
+    # something in the provisioning directory.
+    if not matched_any and all_profiles:
+        print('Warning: no provisioning profile matched {}.{}. Copying all profiles as-is (fake-codesigning fallback).'.format(team_id, bundle_id))
+        for file_path, profile_dict, profile_name in all_profiles:
+            dest_file_name = os.path.basename(file_path)
+            shutil.copyfile(file_path, destination_path + '/' + dest_file_name)
+
 
 def resolve_aps_environment_from_directory(source_path, team_id, bundle_id):
+    fallback_aps_environment = None
     for file_name in os.listdir(source_path):
         file_path = source_path + '/' + file_name
         if os.path.isfile(file_path):
@@ -219,14 +235,27 @@ def resolve_aps_environment_from_directory(source_path, team_id, bundle_id):
 
             profile_dict = plistlib.loads(profile_data)
             profile_name = profile_dict['Entitlements']['application-identifier']
+            aps_env = profile_dict['Entitlements'].get('aps-environment')
+
+            # Remember any profile that has aps-environment as a fallback
+            if aps_env is not None and fallback_aps_environment is None:
+                fallback_aps_environment = aps_env
 
             if profile_name.startswith(team_id + '.' + bundle_id):
                 profile_base_name = profile_name[len(team_id + '.' + bundle_id):]
                 if profile_base_name == '':
-                    if 'aps-environment' not in profile_dict['Entitlements']:
+                    if aps_env is None:
                         print('Provisioning profile at {} does not include an aps-environment entitlement'.format(file_path))
                         sys.exit(1)
-                    return profile_dict['Entitlements']['aps-environment']
+                    return aps_env
+
+    # Swiftgram: when using fake-codesigning with a custom bundle_id, no profile will
+    # match team_id.bundle_id exactly. Fall back to whatever aps-environment we found.
+    if fallback_aps_environment is not None:
+        print('Warning: no provisioning profile matched {}.{}, using aps-environment="{}" from another profile'.format(
+            team_id, bundle_id, fallback_aps_environment))
+        return fallback_aps_environment
+
     return None
 
 
