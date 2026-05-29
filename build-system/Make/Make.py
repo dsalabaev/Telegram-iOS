@@ -618,6 +618,9 @@ def build(bazel, arguments):
     bazel_command_line.set_enable_sandbox(arguments.sandbox)
     bazel_command_line.set_profile_swift(arguments.profileSwift)
 
+    if arguments.disableProvisioningProfiles:
+        bazel_command_line.set_disable_provisioning_profiles()
+
     bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)
 
     bazel_command_line.invoke_build()
@@ -1004,6 +1007,13 @@ if __name__ == '__main__':
         required=False,
         help='Store IPA and DSYM at the specified path after a successful build.',
         metavar='arguments'
+    )
+    buildParser.add_argument(
+        '--disableProvisioningProfiles',
+        action='store_true',
+        default=False,
+        help='Skip provisioning profile bundle_id validation. Use with fake-codesigning '
+             'when the configured bundle_id does not match the fake profiles.',
     )
     buildParser.add_argument(
         '--lock',
