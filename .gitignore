@@ -87,3 +87,4 @@ xcode-files
 **/.claude/settings.local.json
 **/.vscode/launch.json
 /buildbox/*
+config.json

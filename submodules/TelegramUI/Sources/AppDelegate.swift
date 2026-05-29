@@ -1416,13 +1416,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     let _ = (context.context.sharedContext.presentationData.start(next: { presentationData in
                         SGLocalizationManager.shared.downloadLocale(presentationData.strings.baseLanguageCode)
                     }))
-                    if #available(iOS 13.0, *) {
-                        let _ = Task {
-                            let primaryContext = await self.getPrimaryContext(anyContext: context.context)
-                            SGLogger.shared.log("SGIAP", "Verifying Status \(primaryContext.sharedContext.immediateSGStatus.status) for: \(primaryContext.account.peerId.id._internalGetInt64Value())")
-                            let _ = await self.fetchSGStatus(primaryContext: primaryContext)
-                        }
-                    }
+                    // MARK: Swiftgram self-build — IQTP status verification disabled
                     
                 }))
             } else {

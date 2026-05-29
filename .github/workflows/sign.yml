@@ -1,0 +1,291 @@
+name: Sign IPA
+
+# ── When to run ────────────────────────────────────────────────────────────────
+# Trigger manually from the Actions tab. Supply the Run ID of a previous build
+# job and the exact artifact name it produced.
+#
+# Required repository secrets:
+#   IOS_DIST_CERTIFICATE_P12_BASE64   – base64 of your .p12 distribution cert
+#   IOS_DIST_CERTIFICATE_PASSWORD     – password for the .p12
+#   IOS_PROVISIONING_PROFILES_BASE64  – base64 of a .zip containing all
+#                                        *.mobileprovision files (one per target)
+#
+# Optional:
+#   IOS_DIST_CERTIFICATE_DEV_P12_BASE64   – development cert (used when
+#   IOS_DIST_CERTIFICATE_DEV_PASSWORD       signing_type = development)
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: 'Run ID that produced the unsigned IPA'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Artifact name (e.g. Swiftgram-unsigned-12.7-5432)'
+        required: true
+        type: string
+      signing_type:
+        description: 'Signing type'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - adhoc
+          - appstore
+
+jobs:
+  sign:
+    name: Sign (${{ inputs.signing_type }})
+    runs-on: macos-15
+
+    steps:
+      # ── Download unsigned IPA ──────────────────────────────────────────────
+      - name: Download unsigned IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: artifacts
+
+      - name: Verify IPA exists
+        run: |
+          IPA=$(find artifacts -name "*.ipa" | head -1)
+          if [ -z "$IPA" ]; then
+            echo "No IPA found in artifact ${{ inputs.artifact_name }}"
+            exit 1
+          fi
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
+          echo "Found IPA: $IPA ($(du -sh "$IPA" | cut -f1))"
+
+      # ── Import signing certificate ─────────────────────────────────────────
+      - name: Import certificate
+        env:
+          SIGNING_TYPE: ${{ inputs.signing_type }}
+          CERT_P12_BASE64:    ${{ secrets.IOS_DIST_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD:      ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+          CERT_DEV_P12_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_DEV_P12_BASE64 }}
+          CERT_DEV_PASSWORD:   ${{ secrets.IOS_DIST_CERTIFICATE_DEV_PASSWORD }}
+          KEYCHAIN_PASSWORD:  ${{ github.run_id }}-sg
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+          # Choose cert based on signing type
+          if [ "$SIGNING_TYPE" = "development" ] && [ -n "$CERT_DEV_P12_BASE64" ]; then
+            P12_BASE64="$CERT_DEV_P12_BASE64"
+            P12_PASSWORD="$CERT_DEV_PASSWORD"
+          else
+            P12_BASE64="$CERT_P12_BASE64"
+            P12_PASSWORD="$CERT_PASSWORD"
+          fi
+
+          if [ -z "$P12_BASE64" ]; then
+            echo "Certificate secret not set for signing type '$SIGNING_TYPE'"
+            exit 1
+          fi
+
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -f pkcs12
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | head -1 | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "No valid signing identity found in the provided certificate"
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Signing identity: $IDENTITY"
+
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # ── Install provisioning profiles ──────────────────────────────────────
+      - name: Install provisioning profiles
+        env:
+          PROFILES_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILES_BASE64 }}
+        run: |
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
+
+          echo "$PROFILES_BASE64" | base64 --decode > "$RUNNER_TEMP/profiles.zip"
+          unzip -o "$RUNNER_TEMP/profiles.zip" -d "$RUNNER_TEMP/profiles" \
+            "*.mobileprovision" "**/*.mobileprovision" 2>/dev/null || true
+
+          INSTALLED=0
+          while IFS= read -r -d '' profile; do
+            UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" \
+              /dev/stdin <<< "$(security cms -D -i "$profile")" 2>/dev/null || \
+              security cms -D -i "$profile" | plutil -extract UUID raw -)
+            if [ -n "$UUID" ]; then
+              cp "$profile" "$PROFILES_DIR/$UUID.mobileprovision"
+              BUNDLE_ID=$(security cms -D -i "$profile" | \
+                plutil -extract Entitlements.application-identifier raw - 2>/dev/null | \
+                sed 's/^[^.]*\.//')
+              echo "  Installed: $UUID  →  $BUNDLE_ID"
+              INSTALLED=$((INSTALLED + 1))
+            fi
+          done < <(find "$RUNNER_TEMP/profiles" -name "*.mobileprovision" -print0)
+
+          echo "Installed $INSTALLED provisioning profile(s)"
+          if [ "$INSTALLED" -eq 0 ]; then
+            echo "No profiles found in the zip — check IOS_PROVISIONING_PROFILES_BASE64"
+            exit 1
+          fi
+
+          rm -f "$RUNNER_TEMP/profiles.zip"
+
+      # ── Re-sign IPA ────────────────────────────────────────────────────────
+      - name: Re-sign IPA
+        run: |
+          set -euo pipefail
+
+          WORK_DIR="$RUNNER_TEMP/resign"
+          SIGNED_IPA="artifacts/Swiftgram-signed.ipa"
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+          unzip -q "$IPA_PATH" -d "$WORK_DIR"
+
+          APP_PATH=$(find "$WORK_DIR/Payload" -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found in IPA Payload"
+            exit 1
+          fi
+          echo "App bundle: $APP_PATH"
+
+          # ── helpers ──────────────────────────────────────────────────────
+          find_profile() {
+            # Find the provisioning profile matching a given bundle ID.
+            local target_bundle="$1"
+            while IFS= read -r -d '' p; do
+              # application-identifier entitlement: TEAMID.bundle.id
+              local ent_bid
+              ent_bid=$(security cms -D -i "$p" 2>/dev/null | \
+                plutil -extract Entitlements.application-identifier raw - 2>/dev/null | \
+                sed 's/^[^.]*\.//' || true)
+              if [ "$ent_bid" = "$target_bundle" ]; then
+                echo "$p"
+                return
+              fi
+            done < <(find "$PROFILES_DIR" -name "*.mobileprovision" -print0)
+          }
+
+          extract_entitlements() {
+            local profile="$1"
+            local out="$2"
+            security cms -D -i "$profile" 2>/dev/null | \
+              plutil -extract Entitlements xml1 -o "$out" - 2>/dev/null || \
+              security cms -D -i "$profile" 2>/dev/null | \
+              /usr/libexec/PlistBuddy -x -c "Print Entitlements" /dev/stdin > "$out" 2>/dev/null
+          }
+
+          sign_bundle() {
+            local path="$1"
+            local bundle_id
+            bundle_id=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" \
+              "$path/Info.plist" 2>/dev/null || \
+              defaults read "$path/Info" CFBundleIdentifier 2>/dev/null)
+
+            local profile
+            profile=$(find_profile "$bundle_id" || true)
+
+            local codesign_args=(--force --sign "$SIGNING_IDENTITY" --timestamp=none)
+
+            if [ -n "$profile" ]; then
+              cp "$profile" "$path/embedded.mobileprovision"
+              local ents
+              ents=$(mktemp /tmp/ents.XXXXXX.plist)
+              extract_entitlements "$profile" "$ents"
+              codesign_args+=(--entitlements "$ents")
+              codesign "${codesign_args[@]}" "$path"
+              rm -f "$ents"
+              echo "  Signed [$bundle_id]  (profile: $(basename $profile))"
+            else
+              codesign "${codesign_args[@]}" "$path"
+              echo "  Signed [$bundle_id]  (no profile — entitlements from binary)"
+            fi
+          }
+
+          # ── 1. Frameworks ────────────────────────────────────────────────
+          echo "→ Signing frameworks…"
+          while IFS= read -r -d '' fw; do
+            codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$fw"
+            echo "  Framework: $(basename $fw)"
+          done < <(find "$APP_PATH/Frameworks" -maxdepth 1 \
+            \( -name "*.framework" -o -name "*.dylib" \) -print0 2>/dev/null)
+
+          # ── 2. App extensions ────────────────────────────────────────────
+          echo "→ Signing app extensions…"
+          while IFS= read -r -d '' ext; do
+            sign_bundle "$ext"
+          done < <(find "$APP_PATH/PlugIns" -maxdepth 1 -name "*.appex" -print0 2>/dev/null)
+
+          # ── 3. Watch bundles ─────────────────────────────────────────────
+          echo "→ Signing Watch bundles…"
+          while IFS= read -r -d '' watchapp; do
+            while IFS= read -r -d '' watchext; do
+              sign_bundle "$watchext"
+            done < <(find "$watchapp/PlugIns" -maxdepth 1 -name "*.appex" -print0 2>/dev/null)
+            sign_bundle "$watchapp"
+          done < <(find "$APP_PATH/Watch" -maxdepth 1 -name "*.app" -print0 2>/dev/null)
+
+          # ── 4. Main app ──────────────────────────────────────────────────
+          echo "→ Signing main app…"
+          sign_bundle "$APP_PATH"
+
+          # ── 5. Verify ────────────────────────────────────────────────────
+          echo "→ Verifying signature…"
+          codesign -vvv --deep "$APP_PATH" 2>&1 | tail -5
+
+          # ── 6. Repack ────────────────────────────────────────────────────
+          echo "→ Repacking IPA…"
+          (cd "$WORK_DIR" && zip -qr "$OLDPWD/$SIGNED_IPA" Payload)
+          echo "Signed IPA: $SIGNED_IPA ($(du -sh "$SIGNED_IPA" | cut -f1))"
+
+          echo "SIGNED_IPA=$SIGNED_IPA" >> "$GITHUB_ENV"
+
+      # ── Upload signed artifact ─────────────────────────────────────────────
+      - name: Upload signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Swiftgram-${{ inputs.signing_type }}-signed-${{ github.run_number }}
+          path: ${{ env.SIGNED_IPA }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── Cleanup ────────────────────────────────────────────────────────────
+      - name: Delete keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
+      # ── Summary ────────────────────────────────────────────────────────────
+      - name: Summary
+        if: success()
+        run: |
+          echo "### Signed IPA ready :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Source artifact | \`${{ inputs.artifact_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Signing type | ${{ inputs.signing_type }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Identity | ${{ env.SIGNING_IDENTITY }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Output artifact | \`Swiftgram-${{ inputs.signing_type }}-signed-${{ github.run_number }}\` |" >> "$GITHUB_STEP_SUMMARY"
