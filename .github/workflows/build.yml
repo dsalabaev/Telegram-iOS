@@ -25,6 +25,8 @@ jobs:
     # Xcode 26 is required (see versions.json). Use a self-hosted runner with Xcode 26
     # installed, or change to macos-15 and add --overrideXcodeVersion below.
     runs-on: macos-15
+    environment:
+      name: ${{ github.ref_name }}
 
     steps:
       - name: Checkout
